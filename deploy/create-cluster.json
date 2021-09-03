@@ -1,0 +1,14 @@
+{
+    "cluster_name":"depco_unit_test",
+    "spark_version":"7.3.x-cpu-ml-scala2.12",
+    "node_type_id":"Standard_DS3_v2",
+    "spark_conf": {
+        "spark.sql.shuffle.partitions": "= 64",
+        "spark.sql.execution.arrow.pyspark.enabled": "true",
+        "spark.sql.sources.partitionOverwriteMode": "dynamic",
+        "spark.databricks.delta.preview.enabled": "true",
+        "spark.sql.adaptive.enabled": "false",
+        "spark.databricks.delta.checkLatestSchemaOnRead": "false"
+    },
+    "num_workers":1
+}

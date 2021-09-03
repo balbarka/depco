@@ -1,0 +1,126 @@
+#  depco test deploy pipeline
+# https://aka.ms/yaml
+
+trigger:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - python
+
+pool:
+  name: Hosted Ubuntu 1604
+  vmImage: "Ubuntu-16.04"
+
+stages:
+  - stage: PackageTestDeploy
+    displayName: PackageTestDeploy
+    jobs:
+      - job: PackageTestDeploy
+        pool:
+          name: Hosted Ubuntu 1604
+          vmImage: "Ubuntu-16.04"
+        
+        steps:
+            - bash: echo "##vso[task.prependpath]$CONDA/bin"
+              displayName: Add conda to PATH
+  
+            - bash: conda env create --quiet --file deploy/environment.yml
+              displayName: Create Anaconda Environment
+
+            - task: PipAuthenticate@1
+              inputs:
+                artifactFeeds: 'depco_feed'
+                onlyAddExtraIndex: true
+              displayName: Pip Authenticate
+
+            - bash: |
+                source activate depco
+                pip uninstall -y pyspark
+                pip install -U databricks-connect==7.3.18
+                pip install --upgrade databricks-cli
+              displayName: Install Databricks Tools
+
+            - script: |
+                source activate depco
+                echo "$(WORKSPACE_HOST)
+                $(WORKSPACE_TOKEN)" | databricks configure --token
+              displayName: 'Configure Databricks CLI'
+
+            - bash: |
+                source activate depco
+                python setup.py bdist_wheel
+                python setup.py install
+              displayName: Package and Install Wheel
+              workingDirectory: python
+
+            - bash: |
+                source activate depco
+                TEMP_CLUSTER_ID=$(databricks clusters create --json-file create-cluster.json | grep -o  "^.*\"cluster_id\"\:\s*\"[^\"]*" | grep -o '[^\"]*$')
+                echo $TEMP_CLUSTER_ID
+                ./wait_until_running.sh $TEMP_CLUSTER_ID
+                echo "##vso[task.setvariable variable=TEST_CLUSTER_ID]$TEMP_CLUSTER_ID"
+              workingDirectory: deploy
+              displayName: 'Create Databricks Test Cluster'
+
+            - bash: |
+                source activate depco
+                databricks fs mkdirs dbfs:/tmp/depco
+                databricks fs mkdirs dbfs:/tmp/depco/lib
+                databricks fs cp depco-0.11-py3-none-any.whl dbfs:/tmp/depco/lib/depco-0.11-py3-none-any.whl --overwrite
+                databricks libraries install --cluster-id $(TEST_CLUSTER_ID) --whl dbfs:/tmp/depco/lib/depco-0.11-py3-none-any.whl
+                databricks libraries list --cluster-id $(TEST_CLUSTER_ID)
+                databricks clusters restart --cluster-id $(TEST_CLUSTER_ID)
+                ../../deploy/wait_until_running.sh $(TEST_CLUSTER_ID)
+                databricks libraries list --cluster-id $(TEST_CLUSTER_ID)
+              workingDirectory: python/dist
+              displayName: 'Upload Wheel Package to Test Cluster'
+
+            - bash: |
+                source activate depco
+                echo "y
+                $(WORKSPACE_HOST)
+                $(WORKSPACE_TOKEN)
+                $(TEST_CLUSTER_ID)
+                $(WORKSPACE_ORG)
+                15001" | databricks-connect configure
+              displayName: 'Configure Databricks-Connect for Test Cluster'
+
+            - script: |
+                source activate depco
+                pip install pytest
+                pip install pytest-azurepipelines
+                pip install pytest-cov
+                pytest --doctest-modules --junitxml=../junit/test-results.xml --cov=depco --cov-report=html --verbose
+              workingDirectory: python/tests
+              displayName: 'Run pytest and Generate Report'
+
+            - bash: |
+                source activate depco
+                databricks clusters delete --cluster-id $(TEST_CLUSTER_ID)
+                databricks clusters permanent-delete --cluster-id $(TEST_CLUSTER_ID)
+              displayName: 'Clean up test cluster'
+
+            - script: |
+                source activate depco
+                databricks libraries uninstall --cluster-id $(TARGET_CLUSTER_ID) --whl dbfs:/tmp/depco/lib/depco-0.11-py3-none-any.whl
+                databricks fs rm dbfs:/tmp/depco/lib/depco-0.11-py3-none-any.whl
+                databricks fs rm -r dbfs:/tmp/depco/lib
+                databricks fs rm -r dbfs:/tmp/depco
+                databricks clusters start --cluster-id $(TARGET_CLUSTER_ID)
+                databricks clusters restart --cluster-id $(TARGET_CLUSTER_ID)
+                ./wait_until_running.sh $(TARGET_CLUSTER_ID)
+              workingDirectory: deploy
+              displayName: 'Delete Target Cluster Library'
+
+            - script: |
+                source activate depco
+                databricks fs mkdirs dbfs:/tmp/depco
+                databricks fs mkdirs dbfs:/tmp/depco/lib
+                databricks fs cp ./dist/depco-0.11-py3-none-any.whl dbfs:/tmp/depco/lib/depco-0.11-py3-none-any.whl --overwrite
+                databricks libraries install --cluster-id $(TARGET_CLUSTER_ID) --whl dbfs:/tmp/depco/lib/depco-0.11-py3-none-any.whl
+                databricks clusters restart --cluster-id $(TARGET_CLUSTER_ID)
+                ./wait_until_running.sh $(TARGET_CLUSTER_ID)
+              workingDirectory: deploy
+              displayName: 'Load Target Cluster Library'
